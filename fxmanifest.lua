@@ -68,13 +68,11 @@ shared_scripts {
 }
 
 client_scripts {
-    'client/worldbuilder.lua',
     'client/*.lua',
 }
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
-    'server/worldbuilder.lua',
     'server/*.lua',
 }
 

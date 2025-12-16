@@ -161,6 +161,23 @@ lib.callback.register("ogz_propmanager:admin:GetStats", function(source)
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- v3.5 WORLD BUILDER CALLBACKS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+lib.callback.register("ogz_propmanager:server:GetDeletedProps", function(source)
+    if not IsPlayerAdmin(source) then return {} end
+    
+    local tablePrefix = Config.Database.TablePrefix or "ogz_propmanager"
+    local results = MySQL.query.await([[
+        SELECT id, model, coords, radius, reason, deleted_by, created_at 
+        FROM `]] .. tablePrefix .. [[_world_deleted`
+        ORDER BY id DESC
+    ]])
+    
+    return results or {}
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- EVENTS
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -436,16 +453,119 @@ RegisterNetEvent("ogz_propmanager:admin:RemoveAllLootables", function()
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- v3.0 WORLD PROPS ADMIN
+-- WORLD PROPS ADMIN (Full v3.4 Support)
 -- ═══════════════════════════════════════════════════════════════════════════
 
+-- Reset ALL world prop cooldowns
 RegisterNetEvent("ogz_propmanager:admin:ResetAllWorldPropCooldowns", function()
     local source = source
     if not IsPlayerAdmin(source) then return end
     
-    MySQL.update.await([[DELETE FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns`]])
+    local result = MySQL.update.await([[DELETE FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns`]])
     
-    TriggerClientEvent("ogz_propmanager:admin:Notify", source, "All world prop cooldowns reset!", "success")
+    TriggerClientEvent("ogz_propmanager:admin:Notify", source, "All world prop cooldowns reset! (" .. (result or 0) .. " entries cleared)", "success")
+    print("[OGz PropManager] Admin reset all world prop cooldowns")
+end)
+
+-- Reset cooldowns for a specific zone
+RegisterNetEvent("ogz_propmanager:admin:ResetZoneCooldowns", function(zoneId)
+    local source = source
+    if not IsPlayerAdmin(source) then return end
+    if not zoneId then return end
+    
+    local result = MySQL.update.await(
+        [[DELETE FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns` WHERE worldprop_id = ?]],
+        { zoneId }
+    )
+    
+    TriggerClientEvent("ogz_propmanager:admin:Notify", source, 
+        string.format("Zone '%s' cooldowns reset! (%d entries cleared)", zoneId, result or 0), "success")
+    print("[OGz PropManager] Admin reset cooldowns for zone:", zoneId)
+end)
+
+-- Reset cooldowns for a specific player
+RegisterNetEvent("ogz_propmanager:admin:ResetPlayerCooldowns", function(targetPlayerId)
+    local source = source
+    if not IsPlayerAdmin(source) then return end
+    
+    local targetPlayer = exports.qbx_core:GetPlayer(targetPlayerId)
+    if not targetPlayer then
+        TriggerClientEvent("ogz_propmanager:admin:Notify", source, "Player not found or offline", "error")
+        return
+    end
+    
+    local citizenid = targetPlayer.PlayerData.citizenid
+    
+    local result = MySQL.update.await(
+        [[DELETE FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns` WHERE citizenid = ?]],
+        { citizenid }
+    )
+    
+    TriggerClientEvent("ogz_propmanager:admin:Notify", source, 
+        string.format("Cooldowns reset for player %s! (%d entries cleared)", targetPlayerId, result or 0), "success")
+    print("[OGz PropManager] Admin reset cooldowns for player:", citizenid)
+end)
+
+-- Reset only global cooldowns
+RegisterNetEvent("ogz_propmanager:admin:ResetGlobalCooldowns", function()
+    local source = source
+    if not IsPlayerAdmin(source) then return end
+    
+    local result = MySQL.update.await(
+        [[DELETE FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns` WHERE citizenid = 'GLOBAL']]
+    )
+    
+    TriggerClientEvent("ogz_propmanager:admin:Notify", source, 
+        string.format("Global cooldowns reset! (%d entries cleared)", result or 0), "success")
+    print("[OGz PropManager] Admin reset global cooldowns")
+end)
+
+-- Get cooldown statistics
+RegisterNetEvent("ogz_propmanager:admin:GetCooldownStats", function()
+    local source = source
+    if not IsPlayerAdmin(source) then return end
+    
+    local totalCooldowns = MySQL.scalar.await(
+        [[SELECT COUNT(*) FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns`]]
+    ) or 0
+    
+    local playerCooldowns = MySQL.scalar.await(
+        [[SELECT COUNT(DISTINCT citizenid) FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns` WHERE citizenid != 'GLOBAL']]
+    ) or 0
+    
+    local globalCooldowns = MySQL.scalar.await(
+        [[SELECT COUNT(*) FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns` WHERE citizenid = 'GLOBAL']]
+    ) or 0
+    
+    local zoneCounts = MySQL.query.await(
+        [[SELECT worldprop_id, COUNT(*) as count FROM `]] .. Config.Database.TablePrefix .. [[_worldprop_cooldowns` GROUP BY worldprop_id ORDER BY count DESC LIMIT 5]]
+    ) or {}
+    
+    -- Build stats message
+    local statsMsg = string.format(
+        "📊 Cooldown Stats:\n• Total entries: %d\n• Unique players: %d\n• Global entries: %d",
+        totalCooldowns, playerCooldowns, globalCooldowns
+    )
+    
+    if #zoneCounts > 0 then
+        statsMsg = statsMsg .. "\n• Top zones:"
+        for _, zone in ipairs(zoneCounts) do
+            statsMsg = statsMsg .. string.format("\n  - %s: %d", zone.worldprop_id, zone.count)
+        end
+    end
+    
+    TriggerClientEvent("ogz_propmanager:admin:Notify", source, statsMsg, "info")
+end)
+
+-- Force reload world props for all clients
+RegisterNetEvent("ogz_propmanager:admin:ReloadWorldPropsAllClients", function()
+    local source = source
+    if not IsPlayerAdmin(source) then return end
+    
+    TriggerClientEvent("ogz_propmanager:client:ReloadWorldProps", -1)
+    
+    TriggerClientEvent("ogz_propmanager:admin:Notify", source, "World props reload triggered for all clients!", "success")
+    print("[OGz PropManager] Admin triggered world props reload for all clients")
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -542,3 +662,5 @@ RegisterCommand("ogz_clear_logs", function(source, args)
     local deleted = Database_ClearOldLogs(days)
     print("[OGz PropManager] Cleared " .. deleted .. " logs older than " .. days .. " days")
 end, true)
+
+print("^2[OGz PropManager]^0 Admin Server Handlers loaded!")

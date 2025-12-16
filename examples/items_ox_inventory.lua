@@ -46,10 +46,10 @@
 -- These are placeable station kits
 -- ═══════════════════════════════════════════════════════════════════════════
 
-['drug_scale_kit'] = { label = 'Drug Scale Kit', weight = 5000, stack = false, close = true, description = 'Professional digital scale for precise measurements.' },
-['bulk_scale_kit'] = { label = 'Bulk Scale Kit', weight = 15000, stack = false, close = true, description = 'Industrial scale for large quantity measurements.' },
-['rolling_table_kit'] = { label = 'Rolling Table Kit', weight = 8000, stack = false, close = true, description = 'Clean surface setup for rolling joints and blunts.' },
-['packaging_station_kit'] = { label = 'Packaging Station Kit', weight = 12000, stack = false, close = true, description = 'Professional packaging setup for drug operations.' },
+['ogz_drug_scale'] = { label = 'Drug Scale Kit', weight = 5000, stack = false, close = true, description = 'Professional digital scale for precise measurements.' },
+['ogz_bulk_scale'] = { label = 'Bulk Scale Kit', weight = 15000, stack = false, close = true, description = 'Industrial scale for large quantity measurements.' },
+['ogz_rolling_table'] = { label = 'Rolling Table Kit', weight = 8000, stack = false, close = true, description = 'Clean surface setup for rolling joints and blunts.' },
+['ogz_packaging_station'] = { label = 'Packaging Station Kit', weight = 12000, stack = false, close = true, description = 'Professional packaging setup for drug operations.' },
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- PROCESSING TOOLS - v3.1 NEW!

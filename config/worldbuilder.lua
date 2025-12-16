@@ -54,7 +54,7 @@ WorldBuilder = {
         
         -- Debug
         Debug = {
-            enabled = true,                  -- Debug prints
+            enabled = false,                  -- Debug prints
             showMarkers = false,             -- Show markers at spawn locations
             logToDiscord = false,            -- Log admin actions to Discord
         },

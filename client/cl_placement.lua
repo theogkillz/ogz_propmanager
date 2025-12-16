@@ -86,8 +86,9 @@ end
 
 ---Update ghost prop position (raycast mode)
 ---@param prop number
+---@param snapToGround boolean|nil v3.5.2: If true, use GetGroundZFor_3dCoord
 ---@return vector3, number
-local function UpdateGhostPositionRaycast(prop)
+local function UpdateGhostPositionRaycast(prop, snapToGround)
     local playerPed = PlayerPedId()
     local playerCoords = GetEntityCoords(playerPed)
     local playerForward = GetEntityForwardVector(playerPed)
@@ -104,9 +105,23 @@ local function UpdateGhostPositionRaycast(prop)
     local _, hit, hitCoords, surfaceNormal, _ = GetShapeTestResult(rayHandle)
     
     local targetCoords = hitCoords
-    if not hit then
+    if not hit or (hitCoords.x == 0.0 and hitCoords.y == 0.0) then
         -- If no hit, place in front of player
         targetCoords = playerCoords + (playerForward * 3.0)
+    end
+    
+    -- v3.5.2: If snapToGround is enabled, use GetGroundZFor_3dCoord for accurate Z
+    if snapToGround then
+        local foundGround, groundZ = GetGroundZFor_3dCoord(targetCoords.x, targetCoords.y, targetCoords.z + 100.0, false)
+        if foundGround then
+            targetCoords = vector3(targetCoords.x, targetCoords.y, groundZ)
+        else
+            -- Try searching from player height
+            foundGround, groundZ = GetGroundZFor_3dCoord(targetCoords.x, targetCoords.y, playerCoords.z + 50.0, false)
+            if foundGround then
+                targetCoords = vector3(targetCoords.x, targetCoords.y, groundZ)
+            end
+        end
     end
     
     SetEntityCoords(prop, targetCoords.x, targetCoords.y, targetCoords.z, false, false, false, false)
@@ -158,15 +173,25 @@ local function StartRaycastPlacement(placementData)
     
     local currentHeading = 0.0
     local currentHeight = 0.0
-    local isSnappedToGround = false
+    local isSnappedToGround = true  -- v3.5.2: Start snapped to ground!
     local keys = Config.Placement.Keys
+    
+    -- v3.5.2: Snap ghost to ground initially
+    local playerCoords = GetEntityCoords(PlayerPedId())
+    local playerForward = GetEntityForwardVector(PlayerPedId())
+    local startPos = playerCoords + (playerForward * 3.0)
+    local foundGround, groundZ = GetGroundZFor_3dCoord(startPos.x, startPos.y, startPos.z + 50.0, false)
+    if foundGround then
+        SetEntityCoords(ghostProp, startPos.x, startPos.y, groundZ, false, false, false, false)
+    end
     
     -- Show controls with ground snap instruction
     ShowTextUI("[ENTER] Place | [BACKSPACE] Cancel | [SCROLL] Rotate | [↑↓] Height | [ALT] Snap Ground", "fas fa-arrows-alt")
     
     CreateThread(function()
         while isPlacing and DoesEntityExist(ghostProp) do
-            local targetCoords, baseHeading = UpdateGhostPositionRaycast(ghostProp)
+            -- v3.5.2: Pass snapToGround parameter
+            local targetCoords, baseHeading = UpdateGhostPositionRaycast(ghostProp, isSnappedToGround)
             
             -- Handle rotation
             if IsControlPressed(0, keys.rotateLeft) then
@@ -176,7 +201,7 @@ local function StartRaycastPlacement(placementData)
                 currentHeading = currentHeading + 2.0
             end
             
-            -- Handle height adjustment
+            -- Handle height adjustment (breaks ground snap)
             if IsControlPressed(0, keys.heightUp) then
                 currentHeight = currentHeight + Config.Placement.MoveSpeed
                 isSnappedToGround = false
@@ -186,30 +211,17 @@ local function StartRaycastPlacement(placementData)
                 isSnappedToGround = false
             end
             
-            -- Snap to ground (v3.2: Improved ground snap)
+            -- Snap to ground
             if IsControlJustPressed(0, keys.snapGround) then
                 isSnappedToGround = true
                 currentHeight = 0.0
-                
-                -- Use PlaceObjectOnGroundProperly for accurate placement
-                local tempCoords = GetEntityCoords(ghostProp)
-                SetEntityCoords(ghostProp, tempCoords.x, tempCoords.y, tempCoords.z + 0.5, false, false, false, false)
-                PlaceObjectOnGroundProperly(ghostProp)
-                
-                -- Get the new Z and calculate offset
-                local newCoords = GetEntityCoords(ghostProp)
-                currentHeight = newCoords.z - targetCoords.z
-                
                 Notify("Snapped to ground!", "success")
             end
             
-            -- Apply transformations
-            if not isSnappedToGround then
-                SetEntityCoords(ghostProp, targetCoords.x, targetCoords.y, targetCoords.z + currentHeight, false, false, false, false)
-            else
-                -- When snapped, still update X/Y but keep ground-relative Z
-                local currentZ = GetEntityCoords(ghostProp).z
-                SetEntityCoords(ghostProp, targetCoords.x, targetCoords.y, targetCoords.z + currentHeight, false, false, false, false)
+            -- Apply height offset if not snapped (snapped height is handled in UpdateGhostPositionRaycast)
+            if not isSnappedToGround and currentHeight ~= 0.0 then
+                local currentCoords = GetEntityCoords(ghostProp)
+                SetEntityCoords(ghostProp, currentCoords.x, currentCoords.y, targetCoords.z + currentHeight, false, false, false, false)
             end
             SetEntityHeading(ghostProp, currentHeading)
             
@@ -261,15 +273,18 @@ local function StartGizmoPlacement(placementData)
     local forward = GetEntityForwardVector(PlayerPedId())
     local spawnCoords = playerCoords + (forward * 2.0)
     
+    -- v3.5.2: Find ground at spawn position
+    local foundGround, groundZ = GetGroundZFor_3dCoord(spawnCoords.x, spawnCoords.y, spawnCoords.z + 50.0, false)
+    if foundGround then
+        spawnCoords = vector3(spawnCoords.x, spawnCoords.y, groundZ)
+    end
+    
     -- Create the object for gizmo
     local tempProp = CreateObject(modelHash, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false)
     SetEntityHeading(tempProp, playerHeading)
     SetEntityAlpha(tempProp, Config.Placement.GhostAlpha, false)
     SetEntityCollision(tempProp, false, false)
     FreezeEntityPosition(tempProp, true)
-    
-    -- Snap to ground initially
-    PlaceObjectOnGroundProperly(tempProp)
     
     isPlacing = true
     currentPlacementData = placementData

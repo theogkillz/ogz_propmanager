@@ -1,6 +1,6 @@
 --[[
     ═══════════════════════════════════════════════════════════════════════════
-    OGz PropManager v3.5 - SERVER World Builder
+    OGz PropManager v3.5.1 - SERVER World Builder
     ═══════════════════════════════════════════════════════════════════════════
     
     Handles:
@@ -8,6 +8,9 @@
     - Respawn timer system
     - Admin permission checking
     - Sync to all clients
+    
+    v3.5.1: Fixed deleted prop sync to all clients
+            Added WorldBuilderHideNative event for client sync
     
     ═══════════════════════════════════════════════════════════════════════════
 ]]
@@ -220,6 +223,35 @@ local function Database_DeleteSpawnedProp(dbId)
 end
 
 local function Database_DeleteNativeProp(data)
+    -- v3.5.1: Check for duplicates first!
+    -- If we already have this model hidden at similar coords, don't add again
+    local checkResults = MySQL.query.await([[
+        SELECT id, coords FROM `]] .. tablePrefix .. [[_world_deleted`
+        WHERE model = ? AND routing_bucket = ?
+    ]], {
+        tostring(data.model),
+        data.routingBucket or 0,
+    })
+    
+    if checkResults then
+        for _, existing in ipairs(checkResults) do
+            local existingCoords = json.decode(existing.coords)
+            if existingCoords then
+                local dist = math.sqrt(
+                    (data.coords.x - existingCoords.x)^2 + 
+                    (data.coords.y - existingCoords.y)^2 + 
+                    (data.coords.z - existingCoords.z)^2
+                )
+                -- If within 2 meters, it's a duplicate
+                if dist < 2.0 then
+                    DebugPrint("Duplicate deleted prop detected, skipping insert. Existing ID:", existing.id)
+                    return deletedProps[existing.id]  -- Return existing entry
+                end
+            end
+        end
+    end
+    
+    -- No duplicate found, insert new entry
     local id = MySQL.insert.await([[
         INSERT INTO `]] .. tablePrefix .. [[_world_deleted`
         (model, coords, radius, routing_bucket, reason, deleted_by)
@@ -246,6 +278,17 @@ local function Database_DeleteNativeProp(data)
     end
     
     return nil
+end
+
+-- v3.5.1: Remove a deleted prop record (unhide)
+local function Database_UndeleteNativeProp(dbId)
+    MySQL.query([[
+        DELETE FROM `]] .. tablePrefix .. [[_world_deleted`
+        WHERE id = ?
+    ]], { dbId })
+    
+    deletedProps[dbId] = nil
+    DebugPrint("Removed deleted prop record:", dbId)
 end
 
 local function Database_SetPropHarvested(dbId)
@@ -335,7 +378,7 @@ RegisterNetEvent("ogz_propmanager:server:WorldBuilderRequest", function()
         deletedList[#deletedList + 1] = deleteData
     end
     
-    DebugPrint("Sending data to client:", #spawnedList, "spawned,", #deletedList, "deleted")
+    DebugPrint("Sending data to client:", source, "-", #spawnedList, "spawned,", #deletedList, "deleted")
     
     TriggerClientEvent("ogz_propmanager:client:WorldBuilderLoad", source, {
         spawned = spawnedList,
@@ -394,7 +437,7 @@ RegisterNetEvent("ogz_propmanager:server:WorldBuilderDeleteSpawned", function(db
     TriggerClientEvent("ox_lib:notify", source, { description = "Prop deleted", type = "success" })
 end)
 
--- Admin hides a native prop
+-- Admin hides a native prop (v3.5.1: FIXED - now syncs to ALL clients!)
 RegisterNetEvent("ogz_propmanager:server:WorldBuilderDeleteNative", function(data)
     local source = source
     if not IsAdmin(source) then return end
@@ -404,7 +447,25 @@ RegisterNetEvent("ogz_propmanager:server:WorldBuilderDeleteNative", function(dat
     
     local deleteData = Database_DeleteNativeProp(data)
     if deleteData then
-        TriggerClientEvent("ox_lib:notify", source, { description = "Native prop hidden", type = "success" })
+        -- v3.5.1: SYNC TO ALL CLIENTS! This was missing before!
+        TriggerClientEvent("ogz_propmanager:client:WorldBuilderHideNative", -1, deleteData)
+        TriggerClientEvent("ox_lib:notify", source, { description = "Native prop hidden (ID: " .. deleteData.id .. ")", type = "success" })
+        DebugPrint("Synced native prop hide to all clients:", deleteData.id)
+    end
+end)
+
+-- v3.5.1: Admin unhides a native prop
+RegisterNetEvent("ogz_propmanager:server:WorldBuilderUnhideNative", function(dbId)
+    local source = source
+    if not IsAdmin(source) then return end
+    
+    local deleteData = deletedProps[dbId]
+    if deleteData then
+        Database_UndeleteNativeProp(dbId)
+        
+        -- Sync to all clients
+        TriggerClientEvent("ogz_propmanager:client:WorldBuilderUnhideNative", -1, dbId)
+        TriggerClientEvent("ox_lib:notify", source, { description = "Native prop unhidden", type = "success" })
     end
 end)
 
@@ -413,7 +474,7 @@ RegisterNetEvent("ogz_propmanager:server:WorldBuilderSpawnGroup", function(group
     local source = source
     if not IsAdmin(source) then return end
     
-    local groupConfig = WorldBuilder.SpawnGroups and WorldBuilder.SpawnGroups[groupId]
+    local groupConfig = WorldBuilder and WorldBuilder.SpawnGroups and WorldBuilder.SpawnGroups[groupId]
     if not groupConfig then
         TriggerClientEvent("ox_lib:notify", source, { description = "Group not found", type = "error" })
         return
@@ -482,6 +543,8 @@ RegisterNetEvent("ogz_propmanager:server:WorldBuilderReload", function()
     
     local spawned = Database_LoadSpawnedProps()
     local deleted = Database_LoadDeletedProps()
+    
+    DebugPrint("Reload requested - Sending", #spawned, "spawned,", #deleted, "deleted to all clients")
     
     -- Send to all clients
     TriggerClientEvent("ogz_propmanager:client:WorldBuilderLoad", -1, {
@@ -553,6 +616,20 @@ lib.callback.register("ogz_propmanager:server:GetSpawnedPropId", function(source
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- GET DELETED PROPS LIST (for admin menu)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+lib.callback.register("ogz_propmanager:server:GetDeletedProps", function(source)
+    if not IsAdmin(source) then return {} end
+    
+    local list = {}
+    for _, deleteData in pairs(deletedProps) do
+        list[#list + 1] = deleteData
+    end
+    return list
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- STARTUP
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -569,5 +646,5 @@ CreateThread(function()
     for _ in pairs(spawnedProps) do spawnCount = spawnCount + 1 end
     for _ in pairs(deletedProps) do deleteCount = deleteCount + 1 end
     
-    print(string.format("^2[OGz PropManager v3.5]^0 World Builder: %d spawned, %d deleted props", spawnCount, deleteCount))
+    print(string.format("^2[OGz PropManager v3.5.2]^0 World Builder: %d spawned, %d deleted props", spawnCount, deleteCount))
 end)

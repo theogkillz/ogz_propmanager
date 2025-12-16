@@ -245,12 +245,12 @@ WorldProps = {
                 
                 -- What player receives
                 yields = {
-                    { item = "weed_leaf", min = 1, max = 3, chance = 100 },
+                    { item = "weed_leaf", min = 1, max = 5, chance = 100 },
                     -- { item = "weed_seed", min = 1, max = 1, chance = 20 },
                 },
                 
                 -- Harvest behavior
-                destroyOnHarvest = true,   -- Remove prop after harvest?
+                destroyOnHarvest = false,   -- Remove prop after harvest?
                 respawnTime = 5,            -- Seconds to respawn (0 = never/external)
                 
                 -- Cooldown per plant
@@ -348,7 +348,7 @@ WorldProps = {
         
         apple_orchard = {
             name = "Sandy Shores Orchard",
-            enabled = true,
+            enabled = false,
             
             zoneType = "circle",
             center = vec3(1766.0, 4802.0, 41.0),
