@@ -166,7 +166,7 @@ local function Database_LoadDeletedProps()
 end
 
 local function Database_SpawnProp(data)
-    local spawnId = string.format("wb_%s_%d", data.model, os.time())
+    local spawnId = string.format("wb_%s_%d_%d", data.model, os.time(), math.random(10000, 99999))
     
     local id = MySQL.insert.await([[
         INSERT INTO `]] .. tablePrefix .. [[_world_spawned`

@@ -225,11 +225,7 @@ end
 function StartWorldPropPlacement(model, options)
     options = options or {}
     
-    local modelHash = LoadModel(model)
-    if not modelHash then
-        Notify("Invalid model: " .. tostring(model), "error")
-        return
-    end
+    local modelHash = type(model) == "string" and joaat(model) or model
     
     -- Build placement data for placement.lua
     local placementData = {
@@ -242,11 +238,12 @@ function StartWorldPropPlacement(model, options)
         groupId = options.groupId,              -- Optional spawn group
     }
     
-    -- Check if StartWorldBuilderPlacement exists in placement.lua
+    -- Use the unified placement system from placement.lua
     if StartWorldBuilderPlacement then
         StartWorldBuilderPlacement(placementData)
     else
-        -- Fallback: Use our own simple placement
+        -- Fallback: Use our own simple placement (shouldn't happen if placement.lua is updated)
+        DebugPrint("WARNING: StartWorldBuilderPlacement not found in placement.lua, using fallback")
         StartSimplePlacement(placementData)
     end
 end
@@ -254,7 +251,14 @@ end
 -- Simple placement fallback if placement.lua doesn't have our function yet
 function StartSimplePlacement(placementData)
     local modelHash = placementData.modelHash
-    local ghostProp = CreateObject(modelHash, 0, 0, 0, false, false, false)
+    local playerPed = PlayerPedId()
+    local playerCoords = GetEntityCoords(playerPed)
+    
+    -- Create ghost prop in front of player initially
+    local forward = GetEntityForwardVector(playerPed)
+    local startPos = playerCoords + (forward * 3.0)
+    
+    local ghostProp = CreateObject(modelHash, startPos.x, startPos.y, startPos.z, false, false, false)
     
     if not DoesEntityExist(ghostProp) then
         Notify("Failed to create preview", "error")
@@ -264,43 +268,85 @@ function StartSimplePlacement(placementData)
     SetEntityAlpha(ghostProp, 150, false)
     SetEntityCollision(ghostProp, false, false)
     FreezeEntityPosition(ghostProp, true)
+    PlaceObjectOnGroundProperly(ghostProp)
     
     local isPlacing = true
-    local currentHeading = 0.0
+    local currentHeading = GetEntityHeading(playerPed)
+    local currentHeight = 0.0
+    local lastValidCoords = GetEntityCoords(ghostProp)
     
-    Notify("ENTER to place | BACKSPACE to cancel | SCROLL to rotate", "info")
+    -- Show controls using lib
+    lib.showTextUI("[ENTER] Place | [BACKSPACE] Cancel | [SCROLL] Rotate | [↑↓] Height | [ALT] Snap", { position = "top-center" })
     
     CreateThread(function()
         while isPlacing do
             Wait(0)
             
-            -- Update position with raycast
+            -- Get player camera info
             local camCoords = GetGameplayCamCoord()
             local camRot = GetGameplayCamRot(2)
-            local forward = RotationToDirection(camRot)
-            local endCoords = camCoords + (forward * 10.0)
+            local camForward = RotationToDirection(camRot)
+            local endCoords = camCoords + (camForward * 15.0)
             
-            local ray = StartShapeTestRay(camCoords.x, camCoords.y, camCoords.z, endCoords.x, endCoords.y, endCoords.z, 1 + 16, PlayerPedId(), 0)
+            -- Raycast to find ground/surface
+            local ray = StartShapeTestRay(camCoords.x, camCoords.y, camCoords.z, endCoords.x, endCoords.y, endCoords.z, 1 + 16, playerPed, 0)
             local _, hit, hitCoords, _, _ = GetShapeTestResult(ray)
             
-            if hit then
-                SetEntityCoords(ghostProp, hitCoords.x, hitCoords.y, hitCoords.z, false, false, false, false)
-                PlaceObjectOnGroundProperly(ghostProp)
+            local targetCoords
+            if hit and (hitCoords.x ~= 0.0 or hitCoords.y ~= 0.0) then
+                targetCoords = vector3(hitCoords.x, hitCoords.y, hitCoords.z + currentHeight)
+                lastValidCoords = targetCoords
+            else
+                targetCoords = lastValidCoords
             end
             
+            SetEntityCoords(ghostProp, targetCoords.x, targetCoords.y, targetCoords.z, false, false, false, false)
             SetEntityHeading(ghostProp, currentHeading)
             
-            -- Controls
-            if IsControlPressed(0, 15) then currentHeading = currentHeading + 2.0 end  -- Scroll up
-            if IsControlPressed(0, 14) then currentHeading = currentHeading - 2.0 end  -- Scroll down
+            -- Draw marker under prop for visibility
+            DrawMarker(1, targetCoords.x, targetCoords.y, targetCoords.z - 0.5, 0, 0, 0, 0, 0, 0, 1.0, 1.0, 0.2, 0, 255, 0, 100, false, true, 2, nil, nil, false)
             
-            -- Place
-            if IsControlJustPressed(0, 215) then  -- ENTER
+            -- Disable controls to capture them
+            DisableControlAction(0, 14, true) -- Scroll down
+            DisableControlAction(0, 15, true) -- Scroll up
+            DisableControlAction(0, 172, true) -- Arrow up
+            DisableControlAction(0, 173, true) -- Arrow down
+            
+            -- Rotation (scroll)
+            if IsDisabledControlPressed(0, 15) then currentHeading = currentHeading + 3.0 end
+            if IsDisabledControlPressed(0, 14) then currentHeading = currentHeading - 3.0 end
+            
+            -- Height adjustment (arrows)
+            if IsDisabledControlPressed(0, 172) then currentHeight = currentHeight + 0.03 end
+            if IsDisabledControlPressed(0, 173) then currentHeight = currentHeight - 0.03 end
+            
+            -- Ground snap (ALT - key 19)
+            if IsControlJustPressed(0, 19) then
+                PlaceObjectOnGroundProperly(ghostProp)
+                local groundedCoords = GetEntityCoords(ghostProp)
+                currentHeight = 0.0
+                lastValidCoords = groundedCoords
+                Notify("Snapped to ground", "info")
+            end
+            
+            -- Place (ENTER)
+            if IsControlJustPressed(0, 215) then
                 isPlacing = false
+                lib.hideTextUI()
+                
                 local finalCoords = GetEntityCoords(ghostProp)
                 local finalHeading = GetEntityHeading(ghostProp)
                 
+                -- Validate coords
+                if finalCoords.x == 0.0 and finalCoords.y == 0.0 then
+                    Notify("Invalid position - try again", "error")
+                    DeleteEntity(ghostProp)
+                    return
+                end
+                
                 DeleteEntity(ghostProp)
+                
+                DebugPrint("Placing at:", finalCoords.x, finalCoords.y, finalCoords.z)
                 
                 -- Send to server
                 TriggerServerEvent("ogz_propmanager:server:WorldBuilderSpawn", {
@@ -308,16 +354,17 @@ function StartSimplePlacement(placementData)
                     coords = { x = finalCoords.x, y = finalCoords.y, z = finalCoords.z },
                     heading = finalHeading,
                     zone = placementData.zone,
-                    respawnTime = placementData.respawnTime,
+                    respawnTime = placementData.respawnTime or 0,
                     groupId = placementData.groupId,
                 })
                 
                 Notify("Prop placed!", "success")
             end
             
-            -- Cancel
-            if IsControlJustPressed(0, 202) then  -- BACKSPACE
+            -- Cancel (BACKSPACE)
+            if IsControlJustPressed(0, 202) then
                 isPlacing = false
+                lib.hideTextUI()
                 DeleteEntity(ghostProp)
                 Notify("Placement cancelled", "info")
             end

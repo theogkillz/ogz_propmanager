@@ -1,8 +1,8 @@
 --[[
-    OGz PropManager v3.3 - Unified Placement System
+    OGz PropManager v3.5 - Unified Placement System
     
     Handles ghost preview, raycast and gizmo placement modes
-    Works for stations, stashes, AND lootables
+    Works for stations, stashes, lootables, AND world builder
     
     v3.2: Unified placement system for stations and stashes
           Fixed ground snap in raycast mode
@@ -10,6 +10,9 @@
     
     v3.3: Added player-placed lootables with item return
           Full lootable placement support
+    
+    v3.5: Added World Builder integration for admin prop spawning
+          Full gizmo/raycast support for world props
 ]]
 
 local isPlacing = false
@@ -44,6 +47,7 @@ function CancelPlacement()
             -- v3.3: Return lootable item to player if player-placed
             TriggerServerEvent("ogz_propmanager:server:LootablePlacementCancelled", currentPlacementData.item)
         end
+        -- v3.5: World builder doesn't need item return (admin only)
     end
     
     isPlacing = false
@@ -296,7 +300,7 @@ end
 -- │              UNIFIED CONFIRM PLACEMENT                           │
 -- └──────────────────────────────────────────────────────────────────┘
 
----Confirm and finalize placement (handles both stations and stashes)
+---Confirm and finalize placement (handles stations, stashes, lootables, and world builder)
 ---@param placementData table
 ---@param coords vector3
 ---@param heading number
@@ -312,12 +316,15 @@ function ConfirmPlacementUnified(placementData, coords, heading)
     isPlacing = false
     HideTextUI()
     
-    -- Play placement animation
+    -- v3.5: World Builder skips animation for faster placement
+    local skipAnimation = placementData.placementType == "worldbuilder"
+    
+    -- Play placement animation (unless world builder)
     local placeAnim = GetAnimationConfig("Place") or GetAnimationConfig("Placement")
     local success = true
     
-    if placeAnim then
-        success = PlayAnimationWithProgress(placeAnim, "Setting up " .. placementData.label .. "...")
+    if placeAnim and not skipAnimation then
+        success = PlayAnimationWithProgress(placeAnim, "Setting up " .. (placementData.label or "prop") .. "...")
     end
     
     if success then
@@ -360,6 +367,17 @@ function ConfirmPlacementUnified(placementData, coords, heading)
                     bucket = bucket,
                 })
             end
+        elseif placementData.placementType == "worldbuilder" then
+            -- v3.5: World Builder prop spawning
+            TriggerServerEvent("ogz_propmanager:server:WorldBuilderSpawn", {
+                model = placementData.model,
+                coords = {x = coords.x, y = coords.y, z = coords.z},
+                heading = heading or 0.0,
+                zone = placementData.zone,
+                respawnTime = placementData.respawnTime or 0,
+                groupId = placementData.groupId,
+            })
+            Notify("Prop placed!", "success")
         end
     else
         Notify(Config.Notifications.PlaceFail, "error")
@@ -371,6 +389,7 @@ function ConfirmPlacementUnified(placementData, coords, heading)
         elseif placementData.placementType == "lootable" and placementData.playerPlaced then
             TriggerServerEvent("ogz_propmanager:server:LootablePlacementCancelled", placementData.item)
         end
+        -- World builder doesn't have items to return
     end
     
     currentPlacementData = nil
@@ -398,7 +417,7 @@ end
 
 ---Show placement mode selection dialog
 ---@param itemName string Item name for cancellation
----@param placementType string "station" or "stash"
+---@param placementType string "station", "stash", "lootable", or "worldbuilder"
 ---@return string|nil Selected mode or nil if cancelled
 local function SelectPlacementMode(itemName, placementType)
     if Config.Placement.Mode ~= "both" then
@@ -419,12 +438,15 @@ local function SelectPlacementMode(itemName, placementType)
     })
     
     if not choice then
-        -- Cancelled - return item
+        -- Cancelled - return item (if applicable)
         if placementType == "station" then
             TriggerServerEvent("ogz_propmanager:server:PlacementCancelled", itemName)
         elseif placementType == "stash" then
             TriggerServerEvent("ogz_propmanager:server:StashPlacementCancelled", itemName)
+        elseif placementType == "lootable" and itemName then
+            TriggerServerEvent("ogz_propmanager:server:LootablePlacementCancelled", itemName)
         end
+        -- World builder doesn't need item return
         return nil
     end
     
@@ -557,6 +579,42 @@ function StartLootablePlacement(lootType, modelOverride, playerPlaced)
 end
 
 -- ┌──────────────────────────────────────────────────────────────────┐
+-- │                START PLACEMENT (WORLD BUILDER)                   │
+-- └──────────────────────────────────────────────────────────────────┘
+
+---Start placement process for World Builder props (admin only)
+---@param placementData table Contains model, label, zone, respawnTime, groupId
+function StartWorldBuilderPlacement(placementData)
+    if isPlacing then
+        Notify("Already placing something!", "error")
+        return
+    end
+    
+    -- Ensure model is loaded
+    local modelHash = type(placementData.model) == "string" and joaat(placementData.model) or placementData.model
+    if not LoadModel(modelHash) then
+        Notify("Invalid model: " .. tostring(placementData.model), "error")
+        return
+    end
+    
+    -- Select placement mode (no item to return for world builder)
+    local selectedMode = SelectPlacementMode(nil, "worldbuilder")
+    if not selectedMode then return end
+    
+    -- Ensure placement type is set
+    placementData.placementType = "worldbuilder"
+    placementData.label = placementData.label or placementData.model
+    placementData.modelHash = modelHash
+    
+    -- Start appropriate placement mode
+    if selectedMode == "gizmo" then
+        StartGizmoPlacement(placementData)
+    else
+        StartRaycastPlacement(placementData)
+    end
+end
+
+-- ┌──────────────────────────────────────────────────────────────────┐
 -- │                   PREDEFINED MARKERS                             │
 -- └──────────────────────────────────────────────────────────────────┘
 
@@ -594,5 +652,6 @@ end
 exports("StartPlacement", StartPlacement)
 exports("StartStashPlacement", StartStashPlacement)
 exports("StartLootablePlacement", StartLootablePlacement)
+exports("StartWorldBuilderPlacement", StartWorldBuilderPlacement)  -- v3.5
 exports("CancelPlacement", CancelPlacement)
 exports("IsPlacing", IsPlacing)
