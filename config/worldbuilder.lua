@@ -258,14 +258,22 @@ WorldBuilder = {
     
     /wb_spawn [model]       Enter placement mode with specified model
     /wb_spawn               Open model preset menu
-    /wb_delete              Enter delete mode (target any prop)
+    /wb_delete              Toggle delete mode (ox_target precision selection)
+    /wb_hash                Toggle hash mode (copy model info without delete)
     /wb_list                List nearby spawned/deleted props
     /wb_menu                Open full admin menu
     /wb_group [name]        Spawn entire prop group
     /wb_respawn [id]        Force respawn a specific prop
     /wb_clear [radius]      Remove all spawned props in radius
-    /wb_export              Export nearby props to config format
+    /wb_scan [radius]       Scan nearby props and print to console
     /wb_reload              Reload all props from database
+    /wb_cancel              Cancel current mode (delete/placement)
+    
+    DELETE MODE OPTIONS (via ox_target):
+    - Delete Prop           Delete spawned OR hide native prop
+    - Copy Model Hash       Copy just the hash number
+    - Copy Full Config      Copy full config line ready for paste
+    - Exit Delete Mode      Exit without action
     
     ═══════════════════════════════════════════════════════════════════════════
     DATABASE TABLES
@@ -277,4 +285,4 @@ WorldBuilder = {
     ═══════════════════════════════════════════════════════════════════════════
 ]]
 
-return WorldBuilder
+-- FiveM shared scripts dont use return

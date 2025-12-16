@@ -239,6 +239,8 @@ end
 ---Start gizmo placement mode (unified for stations and stashes)
 ---@param placementData table Contains model, label, item, placementType, etc.
 local function StartGizmoPlacement(placementData)
+    DebugPrint("StartGizmoPlacement called for:", placementData.placementType)
+    
     local model = placementData.model
     
     -- Handle model states for stations
@@ -306,6 +308,13 @@ end
 ---@param heading number
 function ConfirmPlacementUnified(placementData, coords, heading)
     DebugPrint("ConfirmPlacementUnified - Type:", placementData.placementType, "Heading:", heading)
+    DebugPrint("  Coords:", coords.x, coords.y, coords.z)
+    
+    -- Prevent double-confirmation
+    if not isPlacing and placementData.placementType ~= "worldbuilder" then
+        DebugPrint("WARNING: ConfirmPlacementUnified called but not in placing state!")
+        return
+    end
     
     -- Delete ghost prop
     if ghostProp and DoesEntityExist(ghostProp) then
@@ -590,6 +599,8 @@ function StartWorldBuilderPlacement(placementData)
         return
     end
     
+    DebugPrint("StartWorldBuilderPlacement called for:", placementData.model)
+    
     -- Ensure model is loaded
     local modelHash = type(placementData.model) == "string" and joaat(placementData.model) or placementData.model
     if not LoadModel(modelHash) then
@@ -600,6 +611,8 @@ function StartWorldBuilderPlacement(placementData)
     -- Select placement mode (no item to return for world builder)
     local selectedMode = SelectPlacementMode(nil, "worldbuilder")
     if not selectedMode then return end
+    
+    DebugPrint("  Selected mode:", selectedMode)
     
     -- Ensure placement type is set
     placementData.placementType = "worldbuilder"

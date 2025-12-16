@@ -25,10 +25,10 @@ local isDeleteMode = false           -- Currently in delete mode?
 local isAdmin = false                -- Cached admin status
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- SETTINGS
+-- SETTINGS (with safe fallbacks)
 -- ═══════════════════════════════════════════════════════════════════════════
 
-local Settings = WorldBuilder.Settings or {}
+local Settings = (WorldBuilder and WorldBuilder.Settings) or {}
 local AdminSettings = Settings.Admin or {}
 local DeleteSettings = Settings.Delete or {}
 local SyncSettings = Settings.Sync or {}
@@ -225,6 +225,8 @@ end
 function StartWorldPropPlacement(model, options)
     options = options or {}
     
+    DebugPrint("StartWorldPropPlacement called for:", model)
+    
     local modelHash = type(model) == "string" and joaat(model) or model
     
     -- Build placement data for placement.lua
@@ -240,10 +242,11 @@ function StartWorldPropPlacement(model, options)
     
     -- Use the unified placement system from placement.lua
     if StartWorldBuilderPlacement then
+        DebugPrint("  Using placement.lua StartWorldBuilderPlacement")
         StartWorldBuilderPlacement(placementData)
     else
         -- Fallback: Use our own simple placement (shouldn't happen if placement.lua is updated)
-        DebugPrint("WARNING: StartWorldBuilderPlacement not found in placement.lua, using fallback")
+        DebugPrint("  WARNING: Using fallback StartSimplePlacement")
         StartSimplePlacement(placementData)
     end
 end
@@ -386,55 +389,154 @@ function RotationToDirection(rotation)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- DELETE MODE
+-- DELETE MODE (Pure Raycast + Laser System)
 -- ═══════════════════════════════════════════════════════════════════════════
 
-local function EnterDeleteMode()
-    if isDeleteMode then return end
-    isDeleteMode = true
+-- Highlight colors (R, G, B)
+local DELETE_COLOR = { r = 255, g = 0, b = 0 }      -- Red for delete
+local HASH_COLOR = { r = 0, g = 255, b = 100 }      -- Green for hash
+
+-- Draw a laser line and markers around entity
+local function DrawEntityHighlight(entity, color)
+    if not DoesEntityExist(entity) then return end
     
-    Notify("DELETE MODE: Target a prop and press E | BACKSPACE to exit", "info")
+    local camCoords = GetGameplayCamCoord()
+    local entityCoords = GetEntityCoords(entity)
+    local model = GetEntityModel(entity)
+    
+    -- Get entity dimensions
+    local min, max = GetModelDimensions(model)
+    
+    -- Draw laser line from camera to entity
+    DrawLine(
+        camCoords.x, camCoords.y, camCoords.z,
+        entityCoords.x, entityCoords.y, entityCoords.z,
+        color.r, color.g, color.b, 200
+    )
+    
+    -- Draw marker at entity base (cylinder)
+    local markerZ = entityCoords.z + min.z - 0.1
+    DrawMarker(
+        1, -- Cylinder
+        entityCoords.x, entityCoords.y, markerZ,
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+        1.0, 1.0, 0.2,
+        color.r, color.g, color.b, 100,
+        false, true, 2, false, nil, nil, false
+    )
+    
+    -- Draw chevron above prop
+    DrawMarker(
+        2, -- Chevron
+        entityCoords.x, entityCoords.y, entityCoords.z + max.z + 0.3,
+        0.0, 0.0, 0.0,
+        0.0, 180.0, 0.0,
+        0.3, 0.3, 0.3,
+        color.r, color.g, color.b, 200,
+        false, true, 2, false, nil, nil, false
+    )
+    
+    return model
+end
+
+-- Draw on-screen info
+local function DrawTargetInfo(model, dist, isDeleteMode)
+    -- Model hash
+    SetTextFont(4)
+    SetTextScale(0.45, 0.45)
+    SetTextColour(255, 255, 255, 255)
+    SetTextDropshadow(0, 0, 0, 0, 255)
+    SetTextEdge(2, 0, 0, 0, 150)
+    SetTextOutline()
+    SetTextCentre(true)
+    SetTextEntry("STRING")
+    AddTextComponentString(string.format("Model: %d", model))
+    DrawText(0.5, 0.88)
+    
+    -- Distance
+    SetTextFont(4)
+    SetTextScale(0.35, 0.35)
+    SetTextColour(200, 200, 200, 200)
+    SetTextCentre(true)
+    SetTextEntry("STRING")
+    AddTextComponentString(string.format("Distance: %.1fm", dist))
+    DrawText(0.5, 0.91)
+    
+    -- Controls
+    SetTextFont(4)
+    SetTextScale(0.35, 0.35)
+    if isDeleteMode then
+        SetTextColour(255, 100, 100, 255)
+    else
+        SetTextColour(100, 255, 150, 255)
+    end
+    SetTextCentre(true)
+    SetTextEntry("STRING")
+    if isDeleteMode then
+        AddTextComponentString("E = Delete | C = Copy Hash | BACKSPACE = Exit")
+    else
+        AddTextComponentString("E = Copy Hash | C = Copy Config | BACKSPACE = Exit")
+    end
+    DrawText(0.5, 0.94)
+end
+
+-- Get entity from raycast
+local function GetTargetedEntity()
+    local playerPed = PlayerPedId()
+    local camCoords = GetGameplayCamCoord()
+    local camRot = GetGameplayCamRot(2)
+    local forward = RotationToDirection(camRot)
+    local endCoords = camCoords + (forward * 50.0)
+    
+    local ray = StartShapeTestLosProbe(
+        camCoords.x, camCoords.y, camCoords.z,
+        endCoords.x, endCoords.y, endCoords.z,
+        16, playerPed, 0
+    )
+    local _, hit, _, _, entity = GetShapeTestResult(ray)
+    
+    if hit == 1 and DoesEntityExist(entity) and IsEntityAnObject(entity) then
+        return entity
+    end
+    return nil
+end
+
+local function ExitDeleteMode()
+    isDeleteMode = false
+    Notify("Delete mode disabled", "info")
+end
+
+local function EnterDeleteMode()
+    if isDeleteMode then 
+        ExitDeleteMode()
+        return 
+    end
+    
+    isDeleteMode = true
+    Notify("DELETE MODE: E=Delete | C=Copy | BACKSPACE=Exit", "success")
     
     CreateThread(function()
         while isDeleteMode do
             Wait(0)
             
-            -- Raycast to find props
-            local camCoords = GetGameplayCamCoord()
-            local camRot = GetGameplayCamRot(2)
-            local forward = RotationToDirection(camRot)
-            local endCoords = camCoords + (forward * 20.0)
+            local entity = GetTargetedEntity()
             
-            local ray = StartShapeTestRay(camCoords.x, camCoords.y, camCoords.z, endCoords.x, endCoords.y, endCoords.z, 16, PlayerPedId(), 0)
-            local _, hit, hitCoords, _, hitEntity = GetShapeTestResult(ray)
-            
-            if hit and DoesEntityExist(hitEntity) and IsEntityAnObject(hitEntity) then
-                local model = GetEntityModel(hitEntity)
-                local entityCoords = GetEntityCoords(hitEntity)
+            if entity then
+                local model = DrawEntityHighlight(entity, DELETE_COLOR)
+                local playerCoords = GetEntityCoords(PlayerPedId())
+                local entityCoords = GetEntityCoords(entity)
+                local dist = #(playerCoords - entityCoords)
                 
-                -- Draw marker on targeted prop
-                DrawMarker(28, entityCoords.x, entityCoords.y, entityCoords.z + 1.0, 0, 0, 0, 0, 0, 0, 0.5, 0.5, 0.5, 255, 0, 0, 150, false, true, 2, nil, nil, false)
+                DrawTargetInfo(model, dist, true)
                 
-                -- Show info
-                SetTextFont(4)
-                SetTextScale(0.4, 0.4)
-                SetTextColour(255, 255, 255, 255)
-                SetTextDropshadow(0, 0, 0, 0, 255)
-                SetTextEdge(2, 0, 0, 0, 150)
-                SetTextDropShadow()
-                SetTextOutline()
-                SetTextEntry("STRING")
-                AddTextComponentString(string.format("Model: %d | Press E to delete", model))
-                DrawText(0.5, 0.9)
-                
-                -- Delete on E press
-                if IsControlJustPressed(0, 38) then  -- E
-                    -- Check if this is a spawned prop or native
+                -- E = Delete
+                if IsControlJustPressed(0, 38) then
                     local isSpawned = false
                     local spawnedId = nil
                     
-                    for dbId, data in pairs(spawnedProps) do
-                        if data.entity == hitEntity then
+                    for dbId, propData in pairs(spawnedProps) do
+                        if propData.entity == entity then
                             isSpawned = true
                             spawnedId = dbId
                             break
@@ -442,51 +544,51 @@ local function EnterDeleteMode()
                     end
                     
                     if isSpawned then
-                        -- Delete spawned prop
-                        if DeleteSettings.confirmDelete then
-                            local confirm = lib.alertDialog({
-                                header = "Delete Spawned Prop",
-                                content = "Delete this spawned prop? (ID: " .. spawnedId .. ")",
-                                centered = true,
-                                cancel = true,
-                            })
-                            if confirm == "confirm" then
-                                TriggerServerEvent("ogz_propmanager:server:WorldBuilderDeleteSpawned", spawnedId)
-                            end
-                        else
+                        local confirm = lib.alertDialog({
+                            header = "Delete Spawned Prop",
+                            content = string.format("Delete this spawned prop?\n\nID: %d\nModel: %d", spawnedId, model),
+                            centered = true,
+                            cancel = true,
+                        })
+                        if confirm == "confirm" then
                             TriggerServerEvent("ogz_propmanager:server:WorldBuilderDeleteSpawned", spawnedId)
+                            Notify("Prop deleted!", "success")
                         end
                     else
-                        -- Delete native prop (hide it)
-                        if DeleteSettings.confirmDelete then
-                            local confirm = lib.alertDialog({
-                                header = "Hide Native Prop",
-                                content = "Hide this native GTA prop permanently?",
-                                centered = true,
-                                cancel = true,
-                            })
-                            if confirm == "confirm" then
-                                TriggerServerEvent("ogz_propmanager:server:WorldBuilderDeleteNative", {
-                                    model = model,
-                                    coords = { x = entityCoords.x, y = entityCoords.y, z = entityCoords.z },
-                                })
-                                HideNativeProp({ model = model, coords = entityCoords, radius = 1.0 })
-                            end
-                        else
+                        local confirm = lib.alertDialog({
+                            header = "Hide Native Prop",
+                            content = string.format("Hide this native GTA prop?\n\nModel: %d", model),
+                            centered = true,
+                            cancel = true,
+                        })
+                        if confirm == "confirm" then
                             TriggerServerEvent("ogz_propmanager:server:WorldBuilderDeleteNative", {
                                 model = model,
                                 coords = { x = entityCoords.x, y = entityCoords.y, z = entityCoords.z },
                             })
                             HideNativeProp({ model = model, coords = entityCoords, radius = 1.0 })
+                            Notify("Native prop hidden!", "success")
                         end
                     end
                 end
+                
+                -- C = Copy hash
+                if IsControlJustPressed(0, 26) then
+                    lib.setClipboard(tostring(model))
+                    Notify("Hash copied: " .. model, "success")
+                    
+                    print("═══════════════════════════════════════════════════════════════")
+                    print("[World Builder] Prop Info:")
+                    print(string.format("  Model Hash: %d", model))
+                    print(string.format("  Coords: vec3(%.4f, %.4f, %.4f)", entityCoords.x, entityCoords.y, entityCoords.z))
+                    print(string.format("  Heading: %.2f", GetEntityHeading(entity)))
+                    print("═══════════════════════════════════════════════════════════════")
+                end
             end
             
-            -- Exit delete mode
-            if IsControlJustPressed(0, 202) then  -- BACKSPACE
-                isDeleteMode = false
-                Notify("Exited delete mode", "info")
+            -- BACKSPACE = Exit
+            if IsControlJustPressed(0, 202) then
+                ExitDeleteMode()
             end
         end
     end)
@@ -499,7 +601,7 @@ end
 local function OpenSpawnMenu()
     local categories = {}
     
-    for category, models in pairs(WorldBuilder.ModelPresets or {}) do
+    for category, models in pairs((WorldBuilder and WorldBuilder.ModelPresets) or {}) do
         categories[#categories + 1] = {
             title = category,
             icon = "fas fa-folder",
@@ -608,7 +710,7 @@ local function OpenMainMenu()
                 icon = "fas fa-layer-group",
                 onSelect = function()
                     local groups = {}
-                    for groupId, groupData in pairs(WorldBuilder.SpawnGroups or {}) do
+                    for groupId, groupData in pairs((WorldBuilder and WorldBuilder.SpawnGroups) or {}) do
                         if groupData.enabled ~= false then
                             groups[#groups + 1] = {
                                 title = groupData.name or groupId,
@@ -674,9 +776,26 @@ end, false)
 
 RegisterCommand("wb_delete", function()
     CheckAdmin(function(hasAdmin)
-        if hasAdmin then EnterDeleteMode()
-        else Notify("No permission", "error") end
+        if not hasAdmin then Notify("No permission", "error") return end
+        
+        -- Toggle delete mode (EnterDeleteMode handles the toggle)
+        EnterDeleteMode()
     end)
+end, false)
+
+RegisterCommand("wb_cancel", function()
+    -- Universal cancel command
+    if isDeleteMode then
+        isDeleteMode = false
+        Notify("Delete mode cancelled", "info")
+    elseif hashModeActive then
+        hashModeActive = false
+        Notify("Hash mode cancelled", "info")
+    elseif IsPlacing and IsPlacing() then
+        CancelPlacement()
+    else
+        Notify("Nothing to cancel", "info")
+    end
 end, false)
 
 RegisterCommand("wb_list", function()
@@ -759,6 +878,78 @@ RegisterCommand("wb_scan", function(source, args)
     
     print("═══════════════════════════════════════════════════════════════")
     print("Found", found, "props")
+end, false)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- HASH MODE (Pure Raycast + Laser System)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local hashModeActive = false
+
+local function ExitHashMode()
+    hashModeActive = false
+    Notify("Hash mode disabled", "info")
+end
+
+local function EnterHashMode()
+    if hashModeActive then
+        ExitHashMode()
+        return
+    end
+    
+    hashModeActive = true
+    Notify("HASH MODE: E=Copy Hash | C=Copy Config | BACKSPACE=Exit", "success")
+    
+    CreateThread(function()
+        while hashModeActive do
+            Wait(0)
+            
+            local entity = GetTargetedEntity()
+            
+            if entity then
+                local model = DrawEntityHighlight(entity, HASH_COLOR)
+                local playerCoords = GetEntityCoords(PlayerPedId())
+                local entityCoords = GetEntityCoords(entity)
+                local dist = #(playerCoords - entityCoords)
+                local heading = GetEntityHeading(entity)
+                
+                DrawTargetInfo(model, dist, false)
+                
+                -- E = Copy hash
+                if IsControlJustPressed(0, 38) then
+                    lib.setClipboard(tostring(model))
+                    Notify("Hash copied: " .. model, "success")
+                    
+                    print("═══════════════════════════════════════════════════════════════")
+                    print("[World Builder] Model Hash: " .. model)
+                    print("═══════════════════════════════════════════════════════════════")
+                end
+                
+                -- C = Copy full config
+                if IsControlJustPressed(0, 26) then
+                    local copyText = string.format('{ model = %d, coords = vec3(%.2f, %.2f, %.2f), heading = %.1f },', 
+                        model, entityCoords.x, entityCoords.y, entityCoords.z, heading)
+                    
+                    lib.setClipboard(copyText)
+                    Notify("Config copied!", "success")
+                    
+                    print("═══════════════════════════════════════════════════════════════")
+                    print("[World Builder] Config Line:")
+                    print("  " .. copyText)
+                    print("═══════════════════════════════════════════════════════════════")
+                end
+            end
+            
+            -- BACKSPACE = Exit
+            if IsControlJustPressed(0, 202) then
+                ExitHashMode()
+            end
+        end
+    end)
+end
+
+RegisterCommand("wb_hash", function()
+    EnterHashMode()
 end, false)
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -850,7 +1041,7 @@ end)
 -- ═══════════════════════════════════════════════════════════════════════════
 
 local function HideConfiguredProps()
-    for _, deleteData in ipairs(WorldBuilder.DeletedProps or {}) do
+    for _, deleteData in ipairs((WorldBuilder and WorldBuilder.DeletedProps) or {}) do
         if type(deleteData.coords) == "vector3" then
             deleteData.coords = { x = deleteData.coords.x, y = deleteData.coords.y, z = deleteData.coords.z }
         end
@@ -862,7 +1053,13 @@ end
 -- INITIALIZATION
 -- ═══════════════════════════════════════════════════════════════════════════
 
+local hasInitialized = false
+
 local function Init()
+    -- Prevent duplicate initialization
+    if hasInitialized then return end
+    hasInitialized = true
+    
     DebugPrint("═══════════════════════════════════════════")
     DebugPrint("Initializing World Builder")
     DebugPrint("═══════════════════════════════════════════")
@@ -878,12 +1075,12 @@ local function Init()
 end
 
 RegisterNetEvent("QBCore:Client:OnPlayerLoaded", function()
-    Wait(4000)
+    Wait(2000)
     Init()
 end)
 
 CreateThread(function()
-    Wait(4000)
+    Wait(2000)
     if LocalPlayer.state.isLoggedIn then
         Init()
     end
@@ -895,6 +1092,10 @@ end)
 
 AddEventHandler("onResourceStop", function(resource)
     if resource ~= GetCurrentResourceName() then return end
+    
+    -- Stop modes
+    isDeleteMode = false
+    hashModeActive = false
     
     -- Delete spawned props
     for _, propData in pairs(spawnedProps) do

@@ -13,7 +13,9 @@
 ]]
 
 local QBX = exports.qbx_core
-local tablePrefix = Config.Database.TablePrefix
+
+-- Safe config access with fallbacks
+local tablePrefix = (Config and Config.Database and Config.Database.TablePrefix) or "ogz_propmanager"
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- STATE
@@ -27,7 +29,7 @@ local respawnQueue = {}      -- Props awaiting respawn { [dbId] = respawnTime }
 -- SETTINGS
 -- ═══════════════════════════════════════════════════════════════════════════
 
-local Settings = WorldBuilder.Settings or {}
+local Settings = (WorldBuilder and WorldBuilder.Settings) or {}
 local AdminSettings = Settings.Admin or {}
 local RespawnSettings = Settings.Respawn or {}
 local DebugSettings = Settings.Debug or { enabled = true }
@@ -320,19 +322,52 @@ end)
 RegisterNetEvent("ogz_propmanager:server:WorldBuilderRequest", function()
     local source = source
     
-    local spawned = Database_LoadSpawnedProps()
-    local deleted = Database_LoadDeletedProps()
+    -- Use cached data instead of re-querying database
+    -- Data is loaded at startup and kept in sync via spawn/delete events
+    local spawnedList = {}
+    local deletedList = {}
+    
+    for _, propData in pairs(spawnedProps) do
+        spawnedList[#spawnedList + 1] = propData
+    end
+    
+    for _, deleteData in pairs(deletedProps) do
+        deletedList[#deletedList + 1] = deleteData
+    end
+    
+    DebugPrint("Sending data to client:", #spawnedList, "spawned,", #deletedList, "deleted")
     
     TriggerClientEvent("ogz_propmanager:client:WorldBuilderLoad", source, {
-        spawned = spawned,
-        deleted = deleted,
+        spawned = spawnedList,
+        deleted = deletedList,
     })
 end)
+
+-- Anti-duplicate spawn protection
+local recentSpawns = {}  -- [source] = timestamp
 
 -- Admin spawns a prop
 RegisterNetEvent("ogz_propmanager:server:WorldBuilderSpawn", function(data)
     local source = source
     if not IsAdmin(source) then return end
+    
+    -- Debounce: Prevent duplicate spawns within 2 seconds
+    local now = os.time()
+    if recentSpawns[source] and (now - recentSpawns[source]) < 2 then
+        DebugPrint("BLOCKED duplicate spawn from source:", source)
+        return
+    end
+    recentSpawns[source] = now
+    
+    -- Validate coords
+    if not data.coords or (data.coords.x == 0 and data.coords.y == 0) then
+        DebugPrint("BLOCKED spawn with invalid coords:", json.encode(data.coords))
+        TriggerClientEvent("ox_lib:notify", source, { description = "Invalid placement position", type = "error" })
+        return
+    end
+    
+    DebugPrint("WorldBuilderSpawn received from:", source, "model:", data.model)
+    DebugPrint("  Coords:", json.encode(data.coords))
     
     local citizenid = GetCitizenId(source)
     data.placedBy = citizenid
