@@ -64,49 +64,18 @@ version '3.1.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
-    'config/config.lua',
-    'config/stations.lua',
-    'config/stashes.lua',
-    'config/lootables.lua',
-    'config/worldprops.lua',
-    'config/furniture.lua',
-    -- 'config/sit_emotes.lua',
-    'config/processing.lua',
-    'config/animations.lua',
-    'config/sounds.lua',
-    'config/events.lua',
+    'config/*.lua',
 }
 
 client_scripts {
-    'client/utils.lua',
-    'client/crafting.lua',
-    'client/target.lua',
-    'client/states.lua',
-    'client/placement.lua',
-    'client/admin.lua',
-    'client/main.lua',
-    -- v3.0 modules
-    'client/stashes.lua',
-    'client/lootables.lua',
-    'client/worldprops.lua',
-    'client/furniture.lua',
-    -- v3.1 modules
-    'client/processing.lua',
-    'client/sit_capture.lua',
+    'client/worldbuilder.lua',
+    'client/*.lua',
 }
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
-    'server/database.lua',
-    'server/admin.lua',
-    'server/main.lua',
-    -- v3.0 modules
-    'server/stashes.lua',
-    'server/lootables.lua',
-    'server/worldprops.lua',
-    -- v3.1 modules
-    'server/processing.lua',
-    'server/sit_capture.lua',
+    'server/worldbuilder.lua',
+    'server/*.lua',
 }
 
 dependencies {

@@ -1,8 +1,9 @@
 --[[
-    OGz PropManager v3.0 - Server World Props
+    OGz PropManager v3.4 - SERVER World Props
     
-    Location-based world prop interactions for shops, stashes, crafting, and rewards.
-    PERFORMANCE OPTIMIZED: Only targets props at specific configured locations.
+    ═══════════════════════════════════════════════════════════════════════════
+    Handles: Cooldowns, Rewards, Harvesting, Stashes, Shops
+    ═══════════════════════════════════════════════════════════════════════════
 ]]
 
 if not Config.Features.WorldProps then return end
@@ -17,24 +18,36 @@ local tablePrefix = Config.Database.TablePrefix
 local function GetPlayer(source) return QBX:GetPlayer(source) end
 local function GetCitizenId(source) local p = GetPlayer(source) return p and p.PlayerData.citizenid end
 local function DebugPrint(...) if Config.Debug then print("[OGz WorldProps]", ...) end end
-local function GetWorldPropConfig(propId) return WorldProps[propId] end
 
-local function GetPlayerGang(source)
-    local player = GetPlayer(source)
-    return player and player.PlayerData.gang and player.PlayerData.gang.name or nil
+local function Notify(source, msg, type)
+    TriggerClientEvent("ox_lib:notify", source, { description = msg, type = type or "info" })
 end
 
-local function GetPlayerJob(source)
-    local player = GetPlayer(source)
-    return player and player.PlayerData.job and player.PlayerData.job.name or nil
+local function FormatTime(seconds)
+    if seconds < 60 then return string.format("%ds", seconds)
+    elseif seconds < 3600 then return string.format("%dm", math.floor(seconds / 60))
+    else return string.format("%dh %dm", math.floor(seconds / 3600), math.floor((seconds % 3600) / 60))
+    end
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- DATABASE OPERATIONS
+-- CONFIG GETTERS
 -- ═══════════════════════════════════════════════════════════════════════════
 
-local function Database_InitWorldProps()
-    -- Cooldowns for world props (per player per location)
+local function GetZoneConfig(zoneId)
+    return WorldProps.Zones and WorldProps.Zones[zoneId]
+end
+
+local function GetLocationConfig(locationId)
+    return WorldProps.Locations and WorldProps.Locations[locationId]
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DATABASE INITIALIZATION
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function Database_Init()
+    -- Cooldowns table - matches install.sql structure
     MySQL.query([[
         CREATE TABLE IF NOT EXISTS `]] .. tablePrefix .. [[_worldprop_cooldowns` (
             `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -48,39 +61,39 @@ local function Database_InitWorldProps()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ]])
     
-    -- Per-player stashes at world locations
-    MySQL.query([[
-        CREATE TABLE IF NOT EXISTS `]] .. tablePrefix .. [[_worldprop_stashes` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `stash_id` VARCHAR(100) UNIQUE NOT NULL,
-            `citizenid` VARCHAR(50) NOT NULL,
-            `worldprop_id` VARCHAR(50) NOT NULL,
-            `location_hash` VARCHAR(100) NOT NULL,
-            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY `unique_player_worldstash` (`citizenid`, `worldprop_id`, `location_hash`),
-            INDEX `idx_stash_id` (`stash_id`),
-            INDEX `idx_citizenid` (`citizenid`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ]])
+    DebugPrint("Database tables initialized")
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- COOLDOWN SYSTEM
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function GetCooldownKey(citizenid, configId, entityHash, cooldownType)
+    if cooldownType == "player" then
+        return citizenid, configId, nil
+    elseif cooldownType == "player_location" or cooldownType == "player_entity" then
+        return citizenid, configId, entityHash
+    elseif cooldownType == "global" then
+        return "GLOBAL", configId, nil
+    elseif cooldownType == "global_entity" then
+        return "GLOBAL", configId, entityHash
+    else
+        return citizenid, configId, entityHash
+    end
+end
+
+local function Database_CheckCooldown(citizenid, configId, entityHash, cooldownType, cooldownSeconds)
+    local cid, cConfig, cEntity = GetCooldownKey(citizenid, configId, entityHash, cooldownType)
     
-    DebugPrint("World props database tables initialized")
-end
-
-function Database_SetWorldPropCooldown(citizenid, worldpropId, locationHash)
-    MySQL.query([[
-        INSERT INTO `]] .. tablePrefix .. [[_worldprop_cooldowns` 
-        (citizenid, worldprop_id, location_hash, last_used)
-        VALUES (?, ?, ?, NOW())
-        ON DUPLICATE KEY UPDATE last_used = NOW()
-    ]], { citizenid, worldpropId, locationHash })
-end
-
-function Database_CheckWorldPropCooldown(citizenid, worldpropId, locationHash, cooldownSeconds)
-    local result = MySQL.single.await([[
-        SELECT last_used, TIMESTAMPDIFF(SECOND, last_used, NOW()) as seconds_since
-        FROM `]] .. tablePrefix .. [[_worldprop_cooldowns` 
+    local query = [[
+        SELECT TIMESTAMPDIFF(SECOND, last_used, NOW()) as seconds_since
+        FROM `]] .. tablePrefix .. [[_worldprop_cooldowns`
         WHERE citizenid = ? AND worldprop_id = ? AND location_hash = ?
-    ]], { citizenid, worldpropId, locationHash })
+        ORDER BY last_used DESC LIMIT 1
+    ]]
+    local params = { cid, cConfig, cEntity or "global" }
+    
+    local result = MySQL.single.await(query, params)
     
     if not result then return false, 0 end
     
@@ -91,240 +104,42 @@ function Database_CheckWorldPropCooldown(citizenid, worldpropId, locationHash, c
     return false, 0
 end
 
-function Database_GetOrCreateWorldStash(citizenid, worldpropId, locationHash)
-    local existing = MySQL.single.await([[
-        SELECT stash_id FROM `]] .. tablePrefix .. [[_worldprop_stashes` 
-        WHERE citizenid = ? AND worldprop_id = ? AND location_hash = ?
-    ]], { citizenid, worldpropId, locationHash })
+local function Database_SetCooldown(citizenid, configId, entityHash, cooldownType)
+    local cid, cConfig, cEntity = GetCooldownKey(citizenid, configId, entityHash, cooldownType)
     
-    if existing then
-        return existing.stash_id
-    end
-    
-    -- Create new stash ID
-    local stashId = string.format("ogz_world_%s_%s_%s", worldpropId, citizenid, os.time())
-    
-    MySQL.insert.await([[
-        INSERT INTO `]] .. tablePrefix .. [[_worldprop_stashes` 
-        (stash_id, citizenid, worldprop_id, location_hash)
-        VALUES (?, ?, ?, ?)
-    ]], { stashId, citizenid, worldpropId, locationHash })
-    
-    return stashId
+    MySQL.query([[
+        INSERT INTO `]] .. tablePrefix .. [[_worldprop_cooldowns`
+        (citizenid, worldprop_id, location_hash, last_used)
+        VALUES (?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE last_used = NOW()
+    ]], { cid, cConfig, cEntity or "global" })
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- ACCESS CONTROL
+-- LOOT ROLLING SYSTEM
 -- ═══════════════════════════════════════════════════════════════════════════
 
-function CanAccessWorldProp(source, worldPropConfig)
-    if not worldPropConfig.visibleTo then return true end
-    
-    if worldPropConfig.visibleTo.gangs then
-        local playerGang = GetPlayerGang(source)
-        for _, gang in ipairs(worldPropConfig.visibleTo.gangs) do
-            if playerGang == gang then return true end
-        end
-    end
-    
-    if worldPropConfig.visibleTo.jobs then
-        local playerJob = GetPlayerJob(source)
-        for _, job in ipairs(worldPropConfig.visibleTo.jobs) do
-            if playerJob == job then return true end
-        end
-    end
-    
-    if worldPropConfig.visibleTo.gangs or worldPropConfig.visibleTo.jobs then
-        return false
-    end
-    
-    return true
-end
-
--- ═══════════════════════════════════════════════════════════════════════════
--- LOCATION HASH
--- ═══════════════════════════════════════════════════════════════════════════
-
-function GetLocationHash(coords)
-    -- Create a unique hash for this location (rounded to prevent floating point issues)
-    local x = math.floor(coords.x * 100) / 100
-    local y = math.floor(coords.y * 100) / 100
-    local z = math.floor(coords.z * 100) / 100
-    return string.format("%.2f_%.2f_%.2f", x, y, z)
-end
-
--- ═══════════════════════════════════════════════════════════════════════════
--- WORLD PROP INTERACTIONS
--- ═══════════════════════════════════════════════════════════════════════════
-
--- SHOP TYPE
-RegisterNetEvent("ogz_propmanager:server:WorldPropShop", function(worldpropId, locationHash, itemName)
-    local source = source
-    local citizenid = GetCitizenId(source)
-    if not citizenid then return end
-    
-    local worldPropConfig = GetWorldPropConfig(worldpropId)
-    if not worldPropConfig or worldPropConfig.type ~= "shop" then return end
-    
-    if not CanAccessWorldProp(source, worldPropConfig) then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "You can't use this", "error")
-        return
-    end
-    
-    -- Find item in shop
-    local shopItem = nil
-    for _, item in ipairs(worldPropConfig.shop.items) do
-        if item.item == itemName then
-            shopItem = item
-            break
-        end
-    end
-    
-    if not shopItem then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "Item not available", "error")
-        return
-    end
-    
-    -- Check money
-    local player = GetPlayer(source)
-    if player.Functions.GetMoney('cash') < shopItem.price then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "Not enough cash", "error")
-        return
-    end
-    
-    -- Purchase
-    if player.Functions.RemoveMoney('cash', shopItem.price, 'world-prop-shop') then
-        exports.ox_inventory:AddItem(source, shopItem.item, 1)
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "Purchased " .. (shopItem.label or shopItem.item), "success")
-        DebugPrint(citizenid, "purchased", shopItem.item, "from", worldpropId)
-    end
-end)
-
--- STASH TYPE (Per-Player)
-RegisterNetEvent("ogz_propmanager:server:WorldPropStash", function(worldpropId, locationHash)
-    local source = source
-    local citizenid = GetCitizenId(source)
-    if not citizenid then return end
-    
-    local worldPropConfig = GetWorldPropConfig(worldpropId)
-    if not worldPropConfig or worldPropConfig.type ~= "stash" then return end
-    
-    if not CanAccessWorldProp(source, worldPropConfig) then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "You can't access this", "error")
-        return
-    end
-    
-    -- Get or create player's stash for this location
-    local stashId = Database_GetOrCreateWorldStash(citizenid, worldpropId, locationHash)
-    
-    -- Register stash if needed
-    local slots = worldPropConfig.stash.slots or 10
-    local maxWeight = worldPropConfig.stash.maxWeight or 50000
-    
-    exports.ox_inventory:RegisterStash(stashId, worldPropConfig.label, slots, maxWeight)
-    exports.ox_inventory:forceOpenInventory(source, 'stash', stashId)
-    
-    DebugPrint(citizenid, "opened world stash", stashId, "at", worldpropId)
-end)
-
--- CRAFTING TYPE
-RegisterNetEvent("ogz_propmanager:server:WorldPropCrafting", function(worldpropId, locationHash, craftingTable)
-    local source = source
-    local citizenid = GetCitizenId(source)
-    if not citizenid then return end
-    
-    local worldPropConfig = GetWorldPropConfig(worldpropId)
-    if not worldPropConfig or worldPropConfig.type ~= "crafting" then return end
-    
-    if not CanAccessWorldProp(source, worldPropConfig) then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "You can't use this", "error")
-        return
-    end
-    
-    -- Open crafting table
-    exports.ox_inventory:openInventory('crafting', { id = craftingTable })
-    DebugPrint(citizenid, "opened crafting", craftingTable, "at", worldpropId)
-end)
-
--- REWARD TYPE
-RegisterNetEvent("ogz_propmanager:server:WorldPropReward", function(worldpropId, locationHash)
-    local source = source
-    local citizenid = GetCitizenId(source)
-    if not citizenid then return end
-    
-    local worldPropConfig = GetWorldPropConfig(worldpropId)
-    if not worldPropConfig or worldPropConfig.type ~= "reward" then return end
-    
-    if not CanAccessWorldProp(source, worldPropConfig) then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "You can't use this", "error")
-        return
-    end
-    
-    -- Check cooldown
-    local cooldownConfig = worldPropConfig.reward.cooldown
-    if cooldownConfig and cooldownConfig.type ~= "none" then
-        local cooldownTime = cooldownConfig.time or 1800
-        local onCooldown, remaining = Database_CheckWorldPropCooldown(citizenid, worldpropId, locationHash, cooldownTime)
-        
-        if onCooldown then
-            TriggerClientEvent("ogz_propmanager:client:Notify", source, 
-                string.format(Config.Notifications.WorldPropCooldown, FormatTime(remaining)), "error")
-            return
-        end
-    end
-    
-    -- Roll loot (uses same system as lootables)
-    local lootResults = RollWorldPropLoot(worldPropConfig.reward)
-    
-    if #lootResults == 0 then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, Config.Notifications.LootEmpty, "info")
-        return
-    end
-    
-    -- Give items
-    local givenItems = {}
-    for _, loot in ipairs(lootResults) do
-        if exports.ox_inventory:AddItem(source, loot.item, loot.count) then
-            table.insert(givenItems, loot)
-        end
-    end
-    
-    if #givenItems > 0 then
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, Config.Notifications.LootFound, "success")
-        
-        -- Set cooldown
-        if cooldownConfig and cooldownConfig.type ~= "none" then
-            Database_SetWorldPropCooldown(citizenid, worldpropId, locationHash)
-        end
-        
-        DebugPrint(citizenid, "got rewards from", worldpropId, "- Items:", #givenItems)
-    else
-        TriggerClientEvent("ogz_propmanager:client:Notify", source, "Inventory full!", "error")
-    end
-end)
-
--- ═══════════════════════════════════════════════════════════════════════════
--- LOOT ROLLING (Same logic as lootables)
--- ═══════════════════════════════════════════════════════════════════════════
-
-function RollWorldPropLoot(rewardConfig)
+local function RollLoot(items, minItems, maxItems)
     local results = {}
     local pool = {}
     
-    for _, itemData in ipairs(rewardConfig.items) do
+    -- Roll for each item
+    for _, itemData in ipairs(items) do
         local roll = math.random(1, 100)
-        if roll <= itemData.chance then
+        if roll <= (itemData.chance or 100) then
             table.insert(pool, itemData)
         end
     end
     
-    if #pool == 0 and #rewardConfig.items > 0 then
-        table.insert(pool, rewardConfig.items[math.random(#rewardConfig.items)])
+    -- Guarantee at least one item if pool is empty
+    if #pool == 0 and #items > 0 then
+        table.insert(pool, items[math.random(#items)])
     end
     
-    local minItems = rewardConfig.minItems or 1
-    local maxItems = rewardConfig.maxItems or 3
-    local itemCount = math.random(minItems, math.min(maxItems, #pool))
+    -- Pick items from pool
+    local min = minItems or 1
+    local max = maxItems or 3
+    local itemCount = math.random(min, math.min(max, #pool))
     
     for i = 1, itemCount do
         if #pool == 0 then break end
@@ -339,41 +154,277 @@ function RollWorldPropLoot(rewardConfig)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- CALLBACKS
+-- CALLBACKS (These are what the client calls!)
 -- ═══════════════════════════════════════════════════════════════════════════
 
-lib.callback.register("ogz_propmanager:server:CheckWorldPropAccess", function(source, worldpropId)
-    local worldPropConfig = GetWorldPropConfig(worldpropId)
-    if not worldPropConfig then return false end
-    return CanAccessWorldProp(source, worldPropConfig)
+-- Zone-based cooldown check
+lib.callback.register("ogz_propmanager:server:CheckZoneCooldown", function(source, zoneId, entityHash, interactionType)
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return false, 0 end
+    
+    local config = GetZoneConfig(zoneId)
+    if not config then 
+        DebugPrint("CheckZoneCooldown: Zone not found:", zoneId)
+        return false, 0 
+    end
+    
+    -- Determine cooldown config based on interaction type
+    local cooldownConfig
+    if interactionType == "harvest" and config.harvest then
+        cooldownConfig = config.harvest.cooldown
+    elseif interactionType == "reward" and config.reward then
+        cooldownConfig = config.reward.cooldown
+    else
+        -- No cooldown for this type
+        return false, 0
+    end
+    
+    if not cooldownConfig or cooldownConfig.type == "none" then 
+        return false, 0 
+    end
+    
+    local cooldownTime = cooldownConfig.time or 300
+    local cooldownType = cooldownConfig.type or "player_entity"
+    
+    DebugPrint("CheckZoneCooldown:", zoneId, "type:", cooldownType, "time:", cooldownTime)
+    
+    return Database_CheckCooldown(citizenid, zoneId, entityHash, cooldownType, cooldownTime)
 end)
 
-lib.callback.register("ogz_propmanager:server:CheckWorldPropCooldown", function(source, worldpropId, locationHash)
+-- Location-based cooldown check (for original v3.0 system)
+lib.callback.register("ogz_propmanager:server:CheckWorldPropCooldown", function(source, locationId, locationHash)
     local citizenid = GetCitizenId(source)
     if not citizenid then return true, 0 end
     
-    local worldPropConfig = GetWorldPropConfig(worldpropId)
-    if not worldPropConfig then return true, 0 end
+    local config = GetLocationConfig(locationId)
+    if not config then return true, 0 end
+    if config.type ~= "reward" then return false, 0 end
     
-    if worldPropConfig.type ~= "reward" then return false, 0 end
-    
-    local cooldownConfig = worldPropConfig.reward and worldPropConfig.reward.cooldown
+    local cooldownConfig = config.reward and config.reward.cooldown
     if not cooldownConfig or cooldownConfig.type == "none" then return false, 0 end
     
     local cooldownTime = cooldownConfig.time or 1800
-    return Database_CheckWorldPropCooldown(citizenid, worldpropId, locationHash, cooldownTime)
+    local cooldownType = cooldownConfig.type or "player_location"
+    
+    return Database_CheckCooldown(citizenid, locationId, locationHash, cooldownType, cooldownTime)
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- HELPERS
+-- ZONE-BASED EVENTS (New v3.4)
 -- ═══════════════════════════════════════════════════════════════════════════
 
-function FormatTime(seconds)
-    if seconds < 60 then return string.format("%ds", seconds)
-    elseif seconds < 3600 then return string.format("%dm", math.floor(seconds / 60))
-    else return string.format("%dh %dm", math.floor(seconds / 3600), math.floor((seconds % 3600) / 60))
+-- HARVEST
+RegisterNetEvent("ogz_propmanager:server:ZoneHarvest", function(zoneId, entityHash, coords)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    local config = GetZoneConfig(zoneId)
+    if not config or config.type ~= "harvest" then 
+        DebugPrint("ZoneHarvest: Invalid zone or type:", zoneId)
+        return 
     end
-end
+    
+    local harvest = config.harvest
+    if not harvest or not harvest.yields then
+        DebugPrint("ZoneHarvest: No yields configured for:", zoneId)
+        return
+    end
+    
+    DebugPrint("ZoneHarvest:", citizenid, "harvesting from", zoneId)
+    
+    -- Roll yields
+    local yields = RollLoot(harvest.yields, 1, #harvest.yields)
+    
+    if #yields == 0 then
+        Notify(source, "Nothing to harvest", "info")
+        return
+    end
+    
+    -- Give items
+    local givenItems = {}
+    for _, yield in ipairs(yields) do
+        if exports.ox_inventory:AddItem(source, yield.item, yield.count) then
+            table.insert(givenItems, yield)
+            DebugPrint("  Gave:", yield.item, "x", yield.count)
+        end
+    end
+    
+    if #givenItems > 0 then
+        Notify(source, "Harvested successfully!", "success")
+        
+        -- Set cooldown
+        local cooldownConfig = harvest.cooldown
+        if cooldownConfig and cooldownConfig.type ~= "none" then
+            Database_SetCooldown(citizenid, zoneId, entityHash, cooldownConfig.type)
+        end
+    else
+        Notify(source, "Inventory full!", "error")
+    end
+end)
+
+-- ZONE REWARD
+RegisterNetEvent("ogz_propmanager:server:ZoneReward", function(zoneId, entityHash, coords)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    local config = GetZoneConfig(zoneId)
+    if not config or config.type ~= "reward" then return end
+    
+    local reward = config.reward
+    if not reward or not reward.items then return end
+    
+    DebugPrint("ZoneReward:", citizenid, "searching in", zoneId)
+    
+    -- Roll loot
+    local lootResults = RollLoot(reward.items, reward.minItems, reward.maxItems)
+    
+    if #lootResults == 0 then
+        Notify(source, "You found nothing", "info")
+        return
+    end
+    
+    -- Give items
+    local givenItems = {}
+    for _, loot in ipairs(lootResults) do
+        if exports.ox_inventory:AddItem(source, loot.item, loot.count) then
+            table.insert(givenItems, loot)
+        end
+    end
+    
+    if #givenItems > 0 then
+        Notify(source, "You found something!", "success")
+        
+        -- Set cooldown
+        local cooldownConfig = reward.cooldown
+        if cooldownConfig and cooldownConfig.type ~= "none" then
+            Database_SetCooldown(citizenid, zoneId, entityHash, cooldownConfig.type)
+        end
+    else
+        Notify(source, "Inventory full!", "error")
+    end
+end)
+
+-- SET COOLDOWN (for custom interactions)
+RegisterNetEvent("ogz_propmanager:server:SetZoneCooldown", function(zoneId, entityHash, cooldownConfig)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    if cooldownConfig and cooldownConfig.type ~= "none" then
+        Database_SetCooldown(citizenid, zoneId, entityHash, cooldownConfig.type)
+        DebugPrint("SetZoneCooldown:", citizenid, zoneId, cooldownConfig.type)
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- LOCATION-BASED EVENTS (Original v3.0)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- SHOP
+RegisterNetEvent("ogz_propmanager:server:WorldPropShop", function(locationId, locationHash, itemName)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    local config = GetLocationConfig(locationId)
+    if not config or config.type ~= "shop" then return end
+    
+    -- Find item
+    local shopItem = nil
+    for _, item in ipairs(config.shop.items) do
+        if item.item == itemName then
+            shopItem = item
+            break
+        end
+    end
+    
+    if not shopItem then
+        Notify(source, "Item not available", "error")
+        return
+    end
+    
+    -- Check money
+    local player = GetPlayer(source)
+    if player.Functions.GetMoney('cash') < shopItem.price then
+        Notify(source, "Not enough cash", "error")
+        return
+    end
+    
+    -- Purchase
+    if player.Functions.RemoveMoney('cash', shopItem.price, 'worldprop-shop') then
+        exports.ox_inventory:AddItem(source, shopItem.item, 1)
+        Notify(source, "Purchased " .. (shopItem.label or shopItem.item), "success")
+    end
+end)
+
+-- REWARD (location-based)
+RegisterNetEvent("ogz_propmanager:server:WorldPropReward", function(locationId, locationHash)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    local config = GetLocationConfig(locationId)
+    if not config or config.type ~= "reward" then return end
+    
+    -- Roll loot
+    local lootResults = RollLoot(config.reward.items, config.reward.minItems, config.reward.maxItems)
+    
+    if #lootResults == 0 then
+        Notify(source, "You found nothing", "info")
+        return
+    end
+    
+    -- Give items
+    local givenItems = {}
+    for _, loot in ipairs(lootResults) do
+        if exports.ox_inventory:AddItem(source, loot.item, loot.count) then
+            table.insert(givenItems, loot)
+        end
+    end
+    
+    if #givenItems > 0 then
+        Notify(source, "You found something!", "success")
+        
+        -- Set cooldown
+        local cooldownConfig = config.reward.cooldown
+        if cooldownConfig and cooldownConfig.type ~= "none" then
+            Database_SetCooldown(citizenid, locationId, locationHash, cooldownConfig.type)
+        end
+    else
+        Notify(source, "Inventory full!", "error")
+    end
+end)
+
+-- STASH
+RegisterNetEvent("ogz_propmanager:server:WorldPropStash", function(locationId, locationHash)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    local config = GetLocationConfig(locationId)
+    if not config or config.type ~= "stash" then return end
+    
+    local stashId = string.format("ogz_world_%s_%s", locationId, citizenid)
+    local slots = config.stash.slots or 10
+    local maxWeight = config.stash.maxWeight or 50000
+    
+    exports.ox_inventory:RegisterStash(stashId, config.label or "Stash", slots, maxWeight)
+    exports.ox_inventory:forceOpenInventory(source, 'stash', stashId)
+end)
+
+-- CRAFTING
+RegisterNetEvent("ogz_propmanager:server:WorldPropCrafting", function(locationId, locationHash, craftingTable)
+    local source = source
+    local citizenid = GetCitizenId(source)
+    if not citizenid then return end
+    
+    local config = GetLocationConfig(locationId)
+    if not config or config.type ~= "crafting" then return end
+    
+    TriggerClientEvent("ox_inventory:openInventory", source, 'crafting', { id = craftingTable })
+end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- STARTUP
@@ -381,16 +432,24 @@ end
 
 CreateThread(function()
     Wait(1500)
-    Database_InitWorldProps()
+    Database_Init()
     
-    local count = 0
+    local zoneCount = 0
     local locationCount = 0
-    for id, config in pairs(WorldProps) do
-        count = count + 1
-        if config.locations then
-            locationCount = locationCount + #config.locations
+    
+    if WorldProps.Zones then
+        for id, config in pairs(WorldProps.Zones) do
+            if config.enabled ~= false then
+                zoneCount = zoneCount + 1
+            end
         end
     end
     
-    print("^2[OGz PropManager v3.0]^0 World props loaded:", count, "definitions,", locationCount, "locations")
+    if WorldProps.Locations then
+        for id, _ in pairs(WorldProps.Locations) do
+            locationCount = locationCount + 1
+        end
+    end
+    
+    print(string.format("^2[OGz PropManager v3.4]^0 WorldProps SERVER: %d zones, %d locations", zoneCount, locationCount))
 end)

@@ -494,20 +494,30 @@ function StandUp()
         
         local bedCoords = seatedData.bedCoords or GetEntityCoords(seatedData.entity)
         local bedHeading = seatedData.bedHeading or GetEntityHeading(seatedData.entity)
+        local bedRad = math.rad(bedHeading)
         
-        -- Calculate edge and stand positions (right side of bed)
-        local sideRad = math.rad(bedHeading + 90)
-        local edgeX = bedCoords.x + (0.3 * math.cos(sideRad))
-        local edgeY = bedCoords.y + (0.3 * math.sin(sideRad))
-        local edgeZ = bedCoords.z + 0.55  -- Sitting height on bed edge
+        -- ═══════════════════════════════════════════════════════════════
+        -- CAPTURED OFFSETS FROM /sit_capture (local to bed orientation)
+        -- Captured: offset = vec3(-0.235, 0.086, 0.400), heading = +90°
+        -- ═══════════════════════════════════════════════════════════════
+        local edgeLocalX = -0.25   -- Left side of bed (perpendicular)
+        local edgeLocalY = 0.0     -- Centered along bed length
+        local edgeLocalZ = 0.4    -- Sitting height above bed origin
         
-        local standX = bedCoords.x + (1.0 * math.cos(sideRad))
-        local standY = bedCoords.y + (1.0 * math.sin(sideRad))
+        local standLocalX = -0.8   -- Further out for final standing position
+        local standLocalY = 0.0
+        
+        -- Calculate edge position (sitting on bed edge) using rotation matrix
+        local edgeX = bedCoords.x + (edgeLocalX * math.cos(bedRad)) - (edgeLocalY * math.sin(bedRad))
+        local edgeY = bedCoords.y + (edgeLocalX * math.sin(bedRad)) + (edgeLocalY * math.cos(bedRad))
+        local edgeZ = bedCoords.z + edgeLocalZ
+        local edgeHeading = bedHeading + 90  -- Face perpendicular to bed
+        
+        -- Calculate final stand position
+        local standX = bedCoords.x + (standLocalX * math.cos(bedRad)) - (standLocalY * math.sin(bedRad))
+        local standY = bedCoords.y + (standLocalX * math.sin(bedRad)) + (standLocalY * math.cos(bedRad))
         local found, groundZ = GetGroundZFor_3dCoord(standX, standY, bedCoords.z + 2.0, false)
         local standZ = found and groundZ or bedCoords.z
-        
-        -- Facing direction when sitting on edge (perpendicular to bed)
-        local edgeHeading = bedHeading + 90
         
         -- Stop laying animation
         ClearPedTasks(ped)
@@ -518,20 +528,21 @@ function StandUp()
         SetEntityHeading(ped, edgeHeading)
         Wait(50)
         
-        -- Play sit on bed edge animation briefly (swing legs moment)
+        -- Play sit on bed edge animation (swing legs moment)
         local sitEdgeDict = "timetable@ron@ig_5_p3"
         if LoadAnimDict(sitEdgeDict) then
             TaskPlayAnim(ped, sitEdgeDict, "ig_5_p3_base", 4.0, -4.0, 800, 0, 0, false, false, false)
             Wait(600)
         end
         
-        -- Now stand up from sitting - this is the "swing legs and stand" motion
+        -- Stand up animation
         local standUpDict = "get_up@sat_on_floor@to_stand"
         if LoadAnimDict(standUpDict) then
-            -- Move slightly forward while standing
-            local standAnimX = edgeX + (0.3 * math.cos(sideRad))
-            local standAnimY = edgeY + (0.3 * math.sin(sideRad))
-            SetEntityCoords(ped, standAnimX, standAnimY, edgeZ - 0.2, false, false, false, false)
+            -- Intermediate position during stand (between edge and final)
+            local midLocalX = -0.5
+            local midX = bedCoords.x + (midLocalX * math.cos(bedRad))
+            local midY = bedCoords.y + (midLocalX * math.sin(bedRad))
+            SetEntityCoords(ped, midX, midY, edgeZ - 0.2, false, false, false, false)
             
             TaskPlayAnim(ped, standUpDict, "getup_0", 4.0, -4.0, 1500, 0, 0, false, false, false)
             Wait(1200)
@@ -541,7 +552,7 @@ function StandUp()
             SetEntityHeading(ped, edgeHeading)
             Wait(300)
         else
-            -- Fallback
+            -- Fallback if animation fails
             SetEntityCoords(ped, standX, standY, standZ, false, false, false, false)
             SetEntityHeading(ped, edgeHeading)
         end
